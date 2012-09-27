@@ -1,6 +1,12 @@
-AUTOMAKE_OPTIONS = foreign nostdinc
 
-libmca_la_SOURCES = mca.c \
+CFLAGS += $(AX_CFLAGS)
+
+INCLUDES = \
+	$(LIBEVENT_INCLUDES) \
+	-I$(top_srcdir)/include
+
+libmca_la_SOURCES = \
+	mca.c \
 	mca_net.c \
 	mca_proto.c \
 	mca_error.c \
@@ -16,8 +22,7 @@ EXTRA_DIST = libmca_config.h.in
 
 lib_LTLIBRARIES = libmca.la
 
-INCLUDES = -I$(top_srcdir)/include -I$(top_srcdir)/src
-
 VERSION = -version-info 1:0:0
 
-libmca_la_LDFLAGS = $(VERSION) -no-undefined
+libmca_la_LDFLAGS = $(VERSION)
+
