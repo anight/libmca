@@ -1,0 +1,792 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html><head><title>MySQL Protocol</title>
+
+
+  
+  <meta http-equiv="content-type" content="text/html; charset=ISO-8859-1">
+  <meta name="author" content="Ian Redfern"></head><body>
+<h1>MySQL Protocol</h1>
+<p>This document descibes the MySQL network protocol version 10, as of
+February 2005 (MySQL 4.1.9). It has been produced by reading
+mysql_com.h, libmysql.c, net.c, sql_parse.cc and sql_show.cc in the
+MySQL source.</p>
+
+<h2>History</h2>
+
+<p>Protocol version 9 was used by MySQL clients and servers before
+version 3.21. It is unlikely to still be in use, as modern clients
+cannot connect to version 9 servers. The primary difference between
+protocol 9 and 10 is in the password algorithm.</p>
+
+<p>Protocol 10 is used by MySQL 3.22 and later. MySQL 4.0 brought in
+replication, and MySQL 4.1 brought in a new password algorithm,
+together with a number of protocol extensions, such as
+multi-statements. It is thus hard for older clients to interoperate
+properly with a new server, even if the server has been setup with
+pre-4.1 passwords.</p>
+
+<p>This document describes the 4.1.x protocol only; the <a href="http://www.redferni.uklinux.net/mysql/MySQL-323.html">previous document</a> can be used to determine the
+changes for older versions.</p>
+
+<h2>Protocol Basics</h2>
+
+<p>The protocol requires first that a client and server negotiate a
+connection, including agreeing about protocol features and
+authentication. This is followed by a series of requests from the
+client and reponses from the server, until either the client issues a
+QUIT request or the connection is broken.</p>
+
+<p>MySQL uses either a Unix domain socket (usually
+<tt>/tmp/mysql.sock</tt> or <tt>/var/run/mysqld/mysql.sock</tt>), an
+MS Windows named pipe (usually <tt>\\hostname\pipe\mysql</tt>), shared
+memory or a TCP port (usually 3306). It treats all communications
+methods identically.</p>
+
+<p>Each client message is sent as a single MySQL 'packet'; a server
+response may consist of many packets. These packets are not related to
+the underlying network layer packets, and indeed many response packets
+may be contained in a single IP datagram.</p>
+
+<p>Each packet begins with a 4-byte header. The first three header bytes give
+the body length as a Little-Endian integer (all MySQL integers are
+Little-Endian unless described otherwise). The fourth gives a
+packet number for this transaction, starting from 0, and including
+both client and server messages. The body of the message then
+follows.</p>
+
+<p>All example packets are taken from a real system.</p>
+
+<h2>Connection</h2>
+
+<p>Once the transport-level connection is established, the connection
+negotiation starts with the server identifying itself.</p>
+
+<h3>Server greeting</h3>
+
+<p>The host sends an initial greeting similar to:</p>
+<table border="0"><tbody><tr><td width="50%"><tt>37 00 00 00</tt></td>
+<td>Body Length=55, packet=0</td></tr>
+<tr><td><tt>0a</tt></td><td>Protocol=10</td></tr>
+<tr><td><tt>34 2e 31 2e 39 2d 6c 6f 67 00</tt></td>
+<td>Version="4.1.9-log"</td></tr>
+<tr><td><tt>07 00 00 00 </tt></td><td>Thread ID=7</td></tr>
+<tr><td><tt>79 46 2f 57 48 43 57 6a 00</tt></td><td>Salt="yF/WHCWj"</td></tr>
+<tr><td><tt>2c a2</tt></td>
+<td>Caps=LONG_FLAG | CONNECT_WITH_DB | COMPRESS | TRANSACTIONS
+| PROTOCOL_41 | SECURE_CONNECTION</td></tr>
+<tr><td><tt>08</tt></td><td>Charset=Latin-1</td></tr>
+<tr><td><tt>02 00</tt></td><td>Status=AUTOCOMMIT</td></tr>
+<tr><td><tt>00 00 00 00 00 00 00 00 00 00 00 00 00</tt></td>
+<td>13 bytes unused</td></tr>
+<tr><td><tt>47 5b 72 4e 6c 58 52 72 66 2b 3f 3a 00</tt></td>
+<td>Rest of Salt="G[rNl XRrf+?:"</td></tr>
+</tbody></table>
+
+<p>The first byte of the message body is the protocol version,
+currently 10. The protocol version is followed by a version string for
+the server, null-terminated - the -log suffix means logging is
+enabled. Following this is a 4-byte integer giving the thread ID of
+the server thread handling the request. Next come the first 8 bytes of
+a 'scramble string' salt for encryption, again null-terminated.</p>
+
+<p>This is followed by a 2-byte integer describing the
+server's capabilities - this server can do LONG_FLAG and
+CONNECT_WITH_DB, as well as the more recent COMPRESS, TRANSACTIONS and
+SSL, and, as it's a 4.1.x server, PROTOCOL_41 and SECURE_CONNECTION.  There
+follow 16 bytes of server characteristics: first a single byte giving
+the server character set and two bytes describing the server status;
+the rest is currently padded with NUL.</p>
+
+<p>Finally, the remaining 12 bytes of the 'scramble string' are written
+if long 20-bytes scrambles are being used (as will usually be the case
+with 4.1.x servers that are not upgrades of previous servers).</p>
+
+<h3>Client authentication</h3>
+
+<p>The client now sends a request to the server, similar to:</p>
+<table border="0"><tbody><tr><td width="50%"><tt>3e 00 00 01</tt></td>
+<td>Body Length=62, packet=1</td></tr>
+<tr><td><tt>85 A6 03 00</tt></td>
+<td>Caps=LONG_PASSWORD | LONG_FLAG | TRANSACTIONS | INTERACTIVE |
+LOCAL_FILES | PROTOCOL_41 | SECURE_CONNECTION | MULTI_STATEMENTS |
+MULTI_RESULTS</td></tr> 
+<tr><td><tt>00 00 00 01</tt></td><td>Max packet=2<sup>24</sup> bytes</td></tr>
+<tr><td><tt>08</tt></td><td>Charset = Latin-1</td></tr>
+<tr><td><tt>00</tt> x 23</td><td>For future expansion</td></tr>
+<tr><td><tt>72 65 64 66 65 72 6e 69 00</tt></td><td>User = "redferni"</td></tr>
+<tr><td><tt>14 ??</tt> x 20</td><td>Password = 20 bytes</td></tr>
+</tbody></table>
+
+<p>This is the client's turn to send its capabilities in two
+bytes. These will always include LONG_PASSWORD, LONG_FLAG,
+TRANSACTIONS, PROTOCOL_41 and SECURE_CONNECTION for 4.1.x clients, and
+in this case include INTERACTIVE, LOCAL_FILES, MULTI_STATEMENTS and
+MULTI_RESULTS as well, as this is the standard MySQL command-line
+client.</p>
+
+<p>This is followed by the maxiumum packet size (usually 16MB) and the
+client's character set, then 23 bytes of padding.</p>
+
+<p>At this point the client will switch to SSL on the communications
+channel if it has set the SSL capability bit - which it will not do if
+the server has not also set that bit.</p>
+
+<p>This is followed by the username, null-terminated, and the
+scrambled password (the example given here is not a real password) if
+a password is provided, preceded with a single byte giving its
+scrambled length (usually 20). If no password is provided, a single
+NUL is sent and no scramble is added.</p>
+
+<p>If the client is trying to connect to a particular database and the
+server is capable of CONNECT_WITH_DB, it will add the database name
+as a null-terminated string (in UTF-8).</p>
+
+<p>The client will now expect the server to send an OK simple response or an
+error. After an OK response, the flow of client commands can begin;
+after an error response the client closes the connection.</p>
+
+<p>Under the very special circumstance that the server and client are
+use 4.1 extensions but the server still has an old password table, it
+will tell the client to resend the password using the old password
+protocol 10 algorithm by sending an end of data packet (the single
+byte 0xfe).</p>
+
+<p>If the client and server are both capable of compression, and the
+client wants to use it (it usually has to be explicitly enabled), the
+client will now switch to using it. It follows the
+standard packet header with a three-byte compressed length. The
+compression mechanism used is standard zlib.</p>
+
+<p>The client may (if it is the 'commercial', rather than free client)
+now check the server's licence by issuing a <tt>SELECT @@license</tt>
+statement and abort the connection if the server's licence does not
+match the client's.</p>
+
+<h2>Field-length encoding</h2>
+
+<p>When data is sent in tabular form, each field is preceded by
+its field length, encoded in the following manner:</p>
+
+<table>
+<tbody><tr><th>Byte</th><th>Meaning</th></tr>
+<tr><td>0-250</td><td>Same as byte</td></tr>
+<tr><td>251</td><td>NULL field</td></tr>
+<tr><td>252</td><td>Value in following 2 bytes</td></tr>
+<tr><td>253</td><td>Value in following 4 bytes</td></tr>
+<tr><td>254</td><td>Value in following 8 bytes</td></tr>
+</tbody></table>
+
+<p>This mechanism is also used for encoding other integers efficiently.</p>
+
+<p>Fields sent in this manner are marked (FLE).</p>
+
+<h2>Simple response</h2>
+
+<p>Most commands produce a simple 'OK' response. This will usually be
+of the form:</p>
+
+<table border="0" width="100%"><tbody><tr><td width="50%"><tt>07 00 00 01</tt></td>
+<td>Body Length=7, packet=1</td></tr>
+<tr><td><tt>00</tt></td><td>Field count = 0 (FLE)</td></tr>
+<tr><td><tt>00</tt></td><td>Affected rows = 0 (FLE)</td></tr>
+<tr><td><tt>00</tt></td><td>Insert ID = 0 (FLE)</td></tr>
+<tr><td><tt>02 00</tt></td><td>Server status = AUTOCOMMIT</td></tr>
+<tr><td><tt>00 00</tt></td><td>Warning count = 0</td></tr>
+</tbody></table>
+
+<p>In the case of an OK response to the initial authentication, of
+course, the packet number will be 2. It is possible that additional
+information may follow in FLE.</p>
+
+<p>For an error, the response will be more like the following:</p>
+
+<table border="0"><tbody><tr><td width="50%"><tt>27 00 00 01</tt></td>
+<td>Body Length=39, packet=1</td></tr>
+<tr><td><tt>ff</tt></td><td>Error</td></tr>
+<tr><td><tt>7a 04</tt></td><td>Error code=NO_SUCH_TABLE (1146)</td></tr>
+<tr><td><tt>54 61 62 6c 65 20 27 72 65 64 66 65 72 6e 69 2e 73 61 6d 70
+6c 65 27 20 64 6f 65 73 6e 27 74 20 65 78 69 73 74</tt></td>
+<td>Error message="Table 'redferni.sample' doesn't exist"</td></tr>
+</tbody></table>
+
+<p>The first byte of the error response body is set to 255.</p>
+
+<p>If the body length is at least 4, then the packet contains a 2-byte
+error code, followed by the error message, of up to 200 characters.</p>
+
+<p>There are 303 error codes, ranging from HASHCHK (1000) to
+CONFLICTING_DECLARATIONS (1302).</p>
+
+<h2>Commands</h2>
+
+<p>A simple command is sent in the form:</p>
+<table border="0"><tbody><tr><td width="50%"><tt>0f 00 00 00</tt></td>
+<td>Body Length=15, packet=0</td></tr>
+<tr><td><tt>03</tt></td><td>Command=QUERY</td></tr>
+<tr><td><tt>73 68 6f 77 20 64 61 74 61 62 61 73 65
+73</tt></td><td>Arg="show databases"</td></tr>
+</tbody></table>
+
+<p>The first byte is the command code, followed by an optional
+argument. Any command not explicitly listed, including any SQL
+command, is sent as QUERY, as in the example.</p>
+
+<h2>Disconnection</h2>
+
+<p>When the client wishes to disconnect, it sends a QUIT simple
+command and closes its end of the connection, as follows<br>
+<table border="0" width="100%"><tbody><tr><td width="50%"><tt>01 00 00 00</tt></td>
+<td>Body Length=1, packet=0</td></tr>
+<tr><td><tt>01</tt></td><td>Command=QUIT</td></tr>
+</tbody></table>
+
+</p><p>The server will close its end of the connection without further
+response.</p>
+
+<h2>Tabular response</h2>
+
+<p>When returning data as a table, as a response to a QUERY,
+FIELD_LIST or PROCESS_INFO command, MySQL first describes the fields
+in each row, then sends the rows.</p>
+
+<p>The first packet contains the (non-zero) number of fields, and possibly the
+number of records.</p>
+
+<table border="0" width="100%"><tbody><tr><td width="50%"><tt>01 00 00 01</tt></td>
+<td>Body Length=1, packet=1</td></tr>
+<tr><td><tt>01</tt></td><td>Number of fields = 1 (FLE)</td></tr>
+</tbody></table>
+
+<p>This is followed by the field descriptions.</p>
+
+<table border="0" width="100%"><tbody><tr><td width="50%"><tt>1e 00 00 02</tt></td>
+<td>Body Length=20, packet=2</td></tr>
+<tr><td><tt>03 64 65 66</tt></td><td>Catalogue = "def"</td></tr>
+<tr><td><tt>00</tt></td><td>DB = ""</td></tr>
+<tr><td><tt>00</tt></td><td>Table = ""</td></tr>
+<tr><td><tt>00</tt></td><td>Org table = ""</td></tr>
+<tr><td><tt>08 44 61 74 61 62 61 73 65</tt></td><td>Name = "Database"</td></tr>
+<tr><td><tt>00</tt></td><td>Org name = ""</td></tr>
+<tr><td><tt>0c</tt></td><td>Fixed length part = 12 (FLE)</td></tr>
+<tr><td><tt>08 00</tt></td><td>Char set = Latin-1</td></tr>
+<tr><td><tt>40 00 00 00</tt></td><td>Length = 64</td></tr>
+<tr><td><tt>fe</tt></td><td>Type = STRING</td></tr>
+<tr><td><tt>01 00</tt></td><td>Flags = NOT_NULL</td></tr>
+<tr><td><tt>1f</tt></td><td>Decimals = 31</td></tr>
+<tr><td><tt>00 00</tt></td><td>Padding</td></tr>
+</tbody></table>
+
+<p>There is one logical packet per field description. Each field
+description contains seven or eight parts, each preceded by their length
+in FLE: the catalogue, database, table, org table,
+field and org field names, a 12 byte fixed length set of field
+metadata, and an optional default value.</p>
+
+<p>The metadata gives the field character set, type, flags and number
+of decimal places.</p>
+
+<table border="0" width="100%"><tbody><tr><td width="50%"><tt>01 00 00 03</tt></td>
+<td>Body Length=1, packet=3</td></tr>
+<tr><td><tt>fe</tt></td><td>End of field list</td></tr>
+</tbody></table>
+
+<p>After all the field description packets, a packet with just a
+single byte of value 254 indicates the start of the rows.</p>
+
+<table border="0" width="100%"><tbody><tr><td width="50%"><tt>09 00 00 04</tt></td>
+<td>Body Length=9, packet=4</td></tr>
+<tr><td><tt>06 41 73 68 6c 65 79</tt></td><td>Row 1 Col 1="Ashley"</td></tr>
+<tr><td><tt>01 31</tt></td><td>Row 1 Col 2=1</td></tr>
+</tbody></table>
+
+<p>Each row is in a separate packet, with the field values preceded by
+a field length. All non-binary fields values are sent as text - in
+particular, all numeric fields appear as ASCII, and timestamps as
+YYYY-MM-DD HH:MM:SS.µµµµµµ. Trailing spaces are removed from char and
+varchar fields.</p>
+
+<table border="0" width="100%"><tbody><tr><td width="50%"><tt>05 00 00 06</tt></td>
+<td>Body Length=5, packet=6</td></tr>
+<tr><td><tt>fe</tt></td><td>End of row list</td></tr>
+<tr><td><tt>00 00</tt></td><td>Warning count = 0</td></tr>
+<tr><td><tt>02 00</tt></td><td>Server status = AUTOCOMMIT</td></tr>
+</tbody></table>
+
+<p>After the last row, another packet holding the byte 254, but with
+length less than 8 indicates the end of the data. It is followed by
+two fields for warning count and server status - for some reason,
+these are the opposite way round to a simple response.</p>
+
+<h2>File upload</h2>
+
+<p> If a file is to be sent to the server, the following response is
+generated:</p>
+
+<table border="0" width="100%"><tbody><tr><td width="50%"><tt>01 00 00 01</tt></td>
+<td>Body Length=1, packet=1</td></tr>
+<tr><td><tt>fb</tt></td><td>251 = Upload file</td></tr>
+</tbody></table>
+
+<p>The file is sent by the client as a series of ordinary packets,
+with the final packet empty.</p>
+
+<p>The server will respond, usually with a simple response.</p>
+
+
+<h2>Complex Responses</h2>
+
+<p>There are four commands that can return complex responses.</p>
+
+<h3>STATISTICS</h3>
+
+<p>The STATISTICS command response is simply a string describing the
+current server statistics.</p>
+
+<h3>FIELD_LIST</h3>
+
+<p>The FIELD_LIST command response is the same as the first part of a
+tabular response (the field descriptions) - with the exception that a
+default value may be attached to each field description.</p>
+
+<h3>PROCESS_INFO</h3>
+
+<p>The PROCESS_INFO command response is first a packet containing a
+field count, in FLE, followed by a tabular
+response.</p>
+
+<h3>QUERY</h3>
+
+<p>The QUERY command handles all SQL commands, as well as almost all
+client commands.</p>
+
+<p>The first part of any response is a number of fields in FLE. A zero
+value indicates a simple response; a NULL value indicates a file
+upload and any other value indicates a tabular response.</p>
+
+<h2>Semantics</h2>
+
+<p>Many MySQL clients and drivers expect certain behaviour from the
+server, and perform queries behind the scenes. The important responses
+are shown below.</p>
+
+<h3>Getting current database and user</h3>
+
+<p>The mysql command-line client issues the request<br>
+<tt>select DATABASE(),USER()</tt><br>
+when the user asks for the current status. It will expect the
+following response:</p>
+
+<table border="2"><tbody><tr><td>DATABASE()</td><td>USER()</td></tr>
+<tr><td>VARCHAR(34) NOT NULL</td><td>VARCHAR(77) NOT NULL</td></tr>
+</tbody></table>
+
+<p>The DATABASE() field may be empty. The USER() field is of the form
+user@host.</p> 
+
+<h3>Status enquiry</h3>
+
+<p>The current status response is similar to:<br>
+</p><pre>Uptime: 129  Threads: 1  Questions: 6  Slow queries: 0  
+Opens: 6  Flush tables: 1  Open tables: 0 Queries per second avg: 0.047</pre>
+<p></p>
+
+<p>The mysql client assumes the number following the first space is a
+time and formats it appropriately.</p>
+
+<h3>Show status</h3>
+
+<table border="2"><tbody><tr><td>Variable_name</td><td>Value</td></tr>
+<tr><td>CHAR(30) NOT NULL</td><td>CHAR(256) NOT NULL</td></tr>
+</tbody></table>
+
+<h3>Show databases</h3>
+
+<table border="2"><tbody><tr><td>Database</td></tr>
+<tr><td>CHAR(64) NOT NULL</td></tr></tbody></table>
+
+<h3>Show tables</h3>
+
+<table border="2"><tbody><tr><td>Tables_in_<i>db</i></td></tr>
+<tr><td>CHAR(64) NOT NULL</td></tr></tbody></table>
+
+<h3>Show fields</h3>
+
+<table border="2"><tbody><tr><td>Field</td><td>Type</td><td>Null</td><td>Key</td><td>Default</td><td>Extra</td></tr>
+<tr><td>CHAR(64) NOT NULL</td><td>CHAR(40) NOT NULL</td><td>CHAR(1)
+NOT NULL</td><td>CHAR(3) NOT NULL</td><td>CHAR(64)</td><td>CHAR(20)
+NOT NULL</td></tr></tbody></table>
+
+<p>The Null field takes values '' or 'YES' - this is presumably a
+bug. The Key field is 'PRI', 'UNI', 'MUL'or ''.</p>
+
+<p>The same output is produced by show columns, desc or describe.</p>
+
+<h3>Show processlist</h3>
+
+<table border="2"><tbody><tr><td>Id</td><td>User</td><td>Host</td><td>db</td><td>Command</td><td>Time</td><td>State</td><td>Info</td></tr>
+<tr><td>Int</td><td>CHAR(16) NOT NULL</td><td>CHAR(64) NOT
+NULL</td><td>CHAR(64)</td><td>CHAR(16) NOT NULL</td><td>CHAR(7) NOT
+NULL</td><td>CHAR(30)</td><td>CHAR(100)</td></tr></tbody></table>
+
+<p>Show processlist full removes the size limit on the Info column.</p>
+
+<h2>Password algorithm</h2>
+
+<p>The new MySQL 4.1.x password algorithm is more complex and probably
+more secure than the older algorithms.</p>
+
+<p>The client uses the salt sent by the server and its own knowledge
+of the password to produce a scrambled password that it sends to the
+server. The server does a similar calculation.</p>
+
+<p>The hashing algorithm used is SHA1 - see RFC 2289, <a href="http://www.faqs.org/rfcs/rfc3174.html">3174</a></p>
+
+<h3>Scrambling operations</h3>
+
+<p>The client first calculates hash1 = SHA1(password), then hash2 =
+SHA1(hash1). The server already knows this, as that is what is held in
+its password table (preceded with a *).</p>
+
+<p>It then appends hash2 to the salt sent by the server and hashes
+that, and finally exclusive ors the result with hash1.</p>
+
+<p>So it sends to the server SHA1(password) XOR
+SHA1(salt.SHA1(SHA1(password)).</p> 
+
+<p>The server does effectively the same calculation and checks the
+result (though for some reason it prefers to undo the Exclusive-OR and compare
+with hash1).</p>
+
+<h2>Magic numbers</h2>
+
+<p>MySQL uses the following codes:</p>
+
+<table border="2"><tbody><tr><th>Capability name</th><th>Value</th><th>Meaning</th></tr>
+<tr><td>LONG_PASSWORD</td><td>1</td><td>New more secure passwords </td></tr>
+<tr><td>FOUND_ROWS</td><td> 2</td><td>Found instead of affected rows </td></tr>
+<tr><td>LONG_FLAG</td><td>4</td><td>Get all column flags </td></tr>
+<tr><td>CONNECT_WITH_DB</td><td>8</td><td>One can specify db on connect </td></tr>
+<tr><td>NO_SCHEMA</td><td>16</td><td>Don't allow database.table.column </td></tr>
+<tr><td>COMPRESS</td><td> 32</td><td>Can use compression protocol </td></tr>
+<tr><td>ODBC</td><td> 64</td><td>ODBC client </td></tr>
+<tr><td>LOCAL_FILES</td><td>128</td><td>Can use LOAD DATA LOCAL </td></tr>
+<tr><td>IGNORE_SPACE</td><td> 256</td><td>Ignore spaces before '(' </td></tr>
+<tr><td>PROTOCOL_41</td><td>512</td><td>Support the 4.1 protocol</td></tr>
+<tr><td>INTERACTIVE</td><td>1024</td><td>This is an interactive client </td></tr>
+<tr><td>SSL</td><td>2048</td><td>Switch to SSL after handshake </td></tr>
+<tr><td>IGNORE_SIGPIPE</td><td> 4096</td><td>IGNORE sigpipes </td></tr>
+<tr><td>TRANSACTIONS</td><td>8192</td><td>Client knows about transactions</td></tr>
+<tr><td>SECURE_CONNECTION</td><td>32768</td><td>New 4.1 authentication</td></tr>
+<tr><td>MULTI_STATEMENTS</td><td>65536</td><td>Multi-statement support</td></tr>
+<tr><td>MULTI_RESULTS</td><td>131072</td><td>Multi-results</td></tr>
+</tbody><caption>Capabilities</caption>
+</table>
+
+<p></p>
+
+<table border="2">
+<tbody><tr><th>Command</th><th>Code</th><th>Arguments</th><th>Allowed from client</th></tr>
+<tr><td>SLEEP</td><td>0</td><td></td><td>No</td></tr>
+<tr><td>QUIT</td><td>1</td><td>""</td></tr>
+<tr><td>INIT_DB</td><td>2</td><td>db</td></tr>
+<tr><td>QUERY</td><td>3</td><td>query</td></tr>
+<tr><td>FIELD_LIST</td><td>4</td><td>table</td></tr>
+<tr><td>CREATE_DB</td><td>5</td><td>db</td></tr>
+<tr><td>DROP_DB</td><td>6</td><td>db</td></tr>
+<tr><td>REFRESH</td><td>7</td><td>option bits</td></tr>
+<tr><td>SHUTDOWN</td><td>8</td><td>level (optional)</td></tr>
+<tr><td>STATISTICS</td><td>9</td><td></td></tr>
+<tr><td>PROCESS_INFO</td><td>10</td><td></td></tr>
+<tr><td>CONNECT</td><td>11</td><td></td><td>No</td></tr>
+<tr><td>PROCESS_KILL</td><td>12</td><td>4-byte pid</td></tr>
+<tr><td>DEBUG</td><td>13</td><td></td></tr>
+<tr><td>PING</td><td>14</td><td></td></tr>
+<tr><td>TIME</td><td>15</td><td></td><td>No</td></tr>
+<tr><td>DELAYED_INSERT</td><td>16</td><td></td><td>No</td></tr>
+<tr><td>CHANGE_USER</td><td>17</td><td>user</td></tr>
+<tr><td>BINLOG_DUMP</td><td>18</td></tr>
+<tr><td>TABLE_DUMP</td><td>19</td></tr>
+<tr><td>CONNECT_OUT</td><td>20</td><td></td><td>No</td></tr>
+<tr><td>REGISTER_SLAVE</td><td>21</td><td></td><td>No</td></tr>
+<tr><td>PREPARE</td><td>22</td><td>query</td></tr>
+<tr><td>EXECUTE</td><td>23</td><td>statement; params</td></tr>
+<tr><td>LONG_DATA</td><td>24</td><td>statement; parameter; data</td></tr>
+<tr><td>CLOSE_STMT</td><td>25</td><td>statement</td></tr>
+<tr><td>RESET_STMT</td><td>26</td><td>statement</td></tr>
+<tr><td>SET_OPTION</td><td>27</td><td>2 byte flags</td></tr>
+</tbody><caption>Commands</caption>
+</table>
+
+<p></p>
+
+<table border="2"><tbody><tr><th>Type</th><th>Code</th><th>Type</th><th>Code</th></tr>
+<tr><td>DECIMAL</td><td>0</td><td>ENUM</td><td>247</td></tr>
+<tr><td>TINY</td><td>1</td><td>SET</td><td>248</td></tr>
+<tr><td>SHORT</td><td>2</td><td>TINY_BLOB</td><td>249</td></tr>
+<tr><td>LONG</td><td>3</td><td>MEDIUM_BLOB</td><td>250</td></tr>
+<tr><td>FLOAT</td><td>4</td><td>LONG_BLOB</td><td>251</td></tr>
+<tr><td>DOUBLE</td><td>5</td><td>BLOB</td><td>252</td></tr>
+<tr><td>NULL</td><td>6</td><td>VAR_STRING</td><td>253</td></tr>
+<tr><td>TIMESTAMP</td><td>7</td><td>STRING</td><td>254</td></tr>
+<tr><td>LONGLONG</td><td>8</td><td>GEOMETRY</td><td>255</td></tr>
+<tr><td>INT24</td><td>9</td></tr>
+<tr><td>DATE</td><td>10</td></tr>
+<tr><td>TIME</td><td>11</td></tr>
+<tr><td>DATETIME</td><td>12</td></tr>
+<tr><td>YEAR</td><td>13</td></tr>
+<tr><td>NEWDATE</td><td>14</td></tr>
+</tbody><caption>Field types</caption>
+</table>
+
+<p></p>
+
+<table border="2"><tbody><tr><th>Status</th><th>Code</th></tr>
+<tr><td>IN_TRANS</td><td>1</td></tr>
+<tr><td>AUTOCOMMIT</td><td>2</td></tr>
+<tr><td>MORE_RESULTS</td><td>4</td></tr>
+<tr><td>MORE_RESULTS_EXISTS</td><td>8</td></tr>
+<tr><td>QUERY_NO_GOOD_INDEX_USED</td><td>16</td></tr>
+<tr><td>QUERY_NO_INDEX_USED</td><td>32</td></tr>
+</tbody><caption>Status codes</caption>
+</table>
+
+<p></p>
+
+<table border="2"><tbody><tr><th>Charset</th><th>Code</th><th>Charset</th><th>Code</th></tr>
+<tr><td>big5_chinese_ci</td><td>1</td><td>latin1_general_cs</td><td>49</td></tr>
+<tr><td>latin2_czech_cs</td><td>2</td><td>cp1251_bin</td><td>50</td></tr>
+<tr><td>dec8_swedish_ci</td><td>3</td><td>cp1251_general_ci</td><td>51</td></tr>
+<tr><td>cp850_general_ci</td><td>4</td><td>cp1251_general_cs</td><td>52</td></tr>
+<tr><td>latin1_german1_ci</td><td>5</td><td>macroman_bin</td><td>53</td></tr>
+<tr><td>hp8_english_ci</td><td>6</td><td>macroman_ci</td><td>54</td></tr>
+<tr><td>koi8r_general_ci</td><td>7</td><td>macroman_ci_ai</td><td>55</td></tr>
+<tr><td>latin1_swedish_ci</td><td>8</td><td>macroman_cs</td><td>56</td></tr>
+<tr><td>latin2_general_ci</td><td>9</td><td>cp1256_general_ci</td><td>57</td></tr>
+<tr><td>swe7_swedish_ci</td><td>10</td><td>cp1257_bin</td><td>58</td></tr>
+<tr><td>ascii_general_ci</td><td>11</td><td>cp1257_general_ci</td><td>59</td></tr>
+<tr><td>ujis_japanese_ci</td><td>12</td><td>cp1257_ci</td><td>60</td></tr>
+<tr><td>sjis_japanese_ci</td><td>13</td><td>cp1257_cs</td><td>61</td></tr>
+<tr><td>cp1251_bulgarian_ci</td><td>14</td><td>binary</td><td>63</td></tr>
+<tr><td>latin1_danish_ci</td><td>15</td><td>armscii8_bin</td><td>64</td></tr>
+<tr><td>hebrew_general_ci</td><td>16</td><td>ascii_bin</td><td>65</td></tr>
+<tr><td>tis620_thai_ci</td><td>18</td><td>cp1250_bin</td><td>66</td></tr>
+<tr><td>euckr_korean_ci</td><td>19</td><td>cp1256_bin</td><td>67</td></tr>
+<tr><td>latin7_estonian_cs</td><td>20</td><td>cp866_bin</td><td>68</td></tr>
+<tr><td>latin2_hungarian_ci</td><td>21</td><td>dec8_bin</td><td>69</td></tr>
+<tr><td>koi8u_general_ci</td><td>22</td><td>greek_bin</td><td>70</td></tr>
+<tr><td>cp1251_ukrainian_ci</td><td>23</td><td>hebrew_bin</td><td>71</td></tr>
+<tr><td>gb2312_chinese_ci</td><td>24</td><td>hp8_bin</td><td>72</td></tr>
+<tr><td>greek_general_ci</td><td>25</td><td>keybcs2_bin</td><td>73</td></tr>
+<tr><td>cp1250_general_ci</td><td>26</td><td>koi8r_bin</td><td>74</td></tr>
+<tr><td>latin2_croatian_ci</td><td>27</td><td>koi8u_bin</td><td>75</td></tr>
+<tr><td>gbk_chinese_ci</td><td>28</td><td>latin2_bin</td><td>77</td></tr>
+<tr><td>cp1257_lithuanian_ci</td><td>29</td><td>latin5_bin</td><td>78</td></tr>
+<tr><td>latin5_turkish_ci</td><td>30</td><td>latin7_bin</td><td>79</td></tr>
+<tr><td>latin1_german2_ci</td><td>31</td><td>cp850_bin</td><td>80</td></tr>
+<tr><td>armscii8_general_ci</td><td>32</td><td>cp852_bin</td><td>81</td></tr>
+<tr><td>utf8_general_ci</td><td>33</td><td>swe7_bin</td><td>82</td></tr>
+<tr><td>cp1250_czech_cs</td><td>34</td><td>utf8_bin</td><td>83</td></tr>
+<tr><td>ucs2_general_ci</td><td>35</td><td>big5_bin</td><td>84</td></tr>
+<tr><td>cp866_general_ci</td><td>36</td><td>euckr_bin</td><td>85</td></tr>
+<tr><td>keybcs2_general_ci</td><td>37</td><td>gb2312</td><td>86</td></tr>
+<tr><td>macce_general_ci</td><td>38</td><td>gbk_bin</td><td>87</td></tr>
+<tr><td>macroman_general_ci</td><td>39</td><td>sjis_bin</td><td>88</td></tr>
+<tr><td>cp852_general_ci</td><td>40</td><td>tis620_bin</td><td>89</td></tr>
+<tr><td>latin7_general_ci</td><td>41</td><td>ucs2_bin</td><td>90</td></tr>
+<tr><td>latin7_general_cs</td><td>42</td><td>ujis_bin</td><td>91</td></tr>
+<tr><td>macce_bin</td><td>43</td><td>geostd8_general_ci</td><td>92</td></tr>
+<tr><td>latin1_bin</td><td>47</td><td>geostd8_bin</td><td>93</td></tr>
+<tr><td>latin1_general_ci</td><td>48</td><td>latin1_spanish_ci</td><td>94</td></tr>
+</tbody><caption>Character sets</caption>
+</table>
+
+<p></p>
+
+<table border="2"><tbody><tr><th>Field Flag</th><th>Value</th><th>Meaning</th></tr>
+<tr><td>NOT_NULL</td><td>1</td><td>Field can't be NULL</td></tr>
+<tr><td>PRI_KEY</td><td>2</td><td>Field is part of a primary key</td></tr>
+<tr><td>UNIQUE_KEY</td><td>4</td><td>Field is part of a unique key</td></tr>
+<tr><td>MULTIPLE_KEY</td><td>8</td><td>Field is part of a key</td></tr>
+<tr><td>BLOB</td><td>16</td><td>Field is a blob</td></tr>
+<tr><td>UNSIGNED</td><td>32</td><td>Field is unsigned</td></tr>
+<tr><td>ZEROFILL</td><td>64</td><td>Field is zerofill</td></tr>
+<tr><td>BINARY</td><td>128</td><td>Field is binary</td></tr>
+<tr><td>ENUM</td><td>256</td><td>Field is an enum</td></tr>
+<tr><td>AUTO_INCREMENT</td><td>512</td><td>Field is an autoincrement field</td></tr>
+<tr><td>TIMESTAMP</td><td>1024</td><td>Field is a timestamp</td></tr>
+<tr><td>SET</td><td>2048</td><td>Field is a set</td></tr>
+<tr><td>NUM</td><td>32768</td><td>Field is num (for clients)</td></tr>
+</tbody><caption>Field flags</caption>
+</table>
+
+<table border="2"><tbody><tr><th>Error</th><th>Value</th><th>Error</th><th>Value</th></tr>
+<tr><td>HASHCHK</td><td>1000</td><td>ABORTING_CONNECTION</td><td>1152</td></tr>
+<tr><td>NISAMCHK</td><td>1001</td><td>NET_PACKET_TOO_LARGE</td><td>1153</td></tr>
+<tr><td>NO</td><td>1002</td><td>NET_READ_ERROR_FROM_PIPE</td><td>1154</td></tr>
+<tr><td>YES</td><td>1003</td><td>NET_FCNTL_ERROR</td><td>1155</td></tr>
+<tr><td>CANT_CREATE_FILE</td><td>1004</td><td>NET_PACKETS_OUT_OF_ORDER</td><td>1156</td></tr>
+<tr><td>CANT_CREATE_TABLE</td><td>1005</td><td>NET_UNCOMPRESS_ERROR</td><td>1157</td></tr>
+<tr><td>CANT_CREATE_DB</td><td>1006</td><td>NET_READ_ERROR</td><td>1158</td></tr>
+<tr><td>DB_CREATE_EXISTS</td><td>1007</td><td>NET_READ_INTERRUPTED</td><td>1159</td></tr>
+<tr><td>DB_DROP_EXISTS</td><td>1008</td><td>NET_ERROR_ON_WRITE</td><td>1160</td></tr>
+<tr><td>DB_DROP_DELETE</td><td>1009</td><td>NET_WRITE_INTERRUPTED</td><td>1161</td></tr>
+<tr><td>DB_DROP_RMDIR</td><td>1010</td><td>TOO_LONG_STRING</td><td>1162</td></tr>
+<tr><td>CANT_DELETE_FILE</td><td>1011</td><td>TABLE_CANT_HANDLE_BLOB</td><td>1163</td></tr>
+<tr><td>CANT_FIND_SYSTEM_REC</td><td>1012</td><td>TABLE_CANT_HANDLE_AUTO_INCREMENT</td><td>1164</td></tr>
+<tr><td>CANT_GET_STAT</td><td>1013</td><td>DELAYED_INSERT_TABLE_LOCKED</td><td>1165</td></tr>
+<tr><td>CANT_GET_WD</td><td>1014</td><td>WRONG_COLUMN_NAME</td><td>1166</td></tr>
+<tr><td>CANT_LOCK</td><td>1015</td><td>WRONG_KEY_COLUMN</td><td>1167</td></tr>
+<tr><td>CANT_OPEN_FILE</td><td>1016</td><td>WRONG_MRG_TABLE</td><td>1168</td></tr>
+<tr><td>FILE_NOT_FOUND</td><td>1017</td><td>DUP_UNIQUE</td><td>1169</td></tr>
+<tr><td>CANT_READ_DIR</td><td>1018</td><td>BLOB_KEY_WITHOUT_LENGTH</td><td>1170</td></tr>
+<tr><td>CANT_SET_WD</td><td>1019</td><td>PRIMARY_CANT_HAVE_NULL</td><td>1171</td></tr>
+<tr><td>CHECKREAD</td><td>1020</td><td>TOO_MANY_ROWS</td><td>1172</td></tr>
+<tr><td>DISK_FULL</td><td>1021</td><td>REQUIRES_PRIMARY_KEY</td><td>1173</td></tr>
+<tr><td>DUP_KEY</td><td>1022</td><td>NO_RAID_COMPILED</td><td>1174</td></tr>
+<tr><td>ERROR_ON_CLOSE</td><td>1023</td><td>UPDATE_WITHOUT_KEY_IN_SAFE_MODE</td><td>1175</td></tr>
+<tr><td>ERROR_ON_READ</td><td>1024</td><td>KEY_DOES_NOT_EXITS</td><td>1176</td></tr>
+<tr><td>ERROR_ON_RENAME</td><td>1025</td><td>CHECK_NO_SUCH_TABLE</td><td>1177</td></tr>
+<tr><td>ERROR_ON_WRITE</td><td>1026</td><td>CHECK_NOT_IMPLEMENTED</td><td>1178</td></tr>
+<tr><td>FILE_USED</td><td>1027</td><td>CANT_DO_THIS_DURING_AN_TRANSACTION</td><td>1179</td></tr>
+<tr><td>FILSORT_ABORT</td><td>1028</td><td>ERROR_DURING_COMMIT</td><td>1180</td></tr>
+<tr><td>FORM_NOT_FOUND</td><td>1029</td><td>ERROR_DURING_ROLLBACK</td><td>1181</td></tr>
+<tr><td>GET_ERRNO</td><td>1030</td><td>ERROR_DURING_FLUSH_LOGS</td><td>1182</td></tr>
+<tr><td>ILLEGAL_HA</td><td>1031</td><td>ERROR_DURING_CHECKPOINT</td><td>1183</td></tr>
+<tr><td>KEY_NOT_FOUND</td><td>1032</td><td>NEW_ABORTING_CONNECTION</td><td>1184</td></tr>
+<tr><td>NOT_FORM_FILE</td><td>1033</td><td>DUMP_NOT_IMPLEMENTED</td><td>1185</td></tr>
+<tr><td>NOT_KEYFILE</td><td>1034</td><td>FLUSH_MASTER_BINLOG_CLOSED</td><td>1186</td></tr>
+<tr><td>OLD_KEYFILE</td><td>1035</td><td>INDEX_REBUILD</td><td>1187</td></tr>
+<tr><td>OPEN_AS_READONLY</td><td>1036</td><td>MASTER</td><td>1188</td></tr>
+<tr><td>OUTOFMEMORY</td><td>1037</td><td>MASTER_NET_READ</td><td>1189</td></tr>
+<tr><td>OUT_OF_SORTMEMORY</td><td>1038</td><td>MASTER_NET_WRITE</td><td>1190</td></tr>
+<tr><td>UNEXPECTED_EOF</td><td>1039</td><td>FT_MATCHING_KEY_NOT_FOUND</td><td>1191</td></tr>
+<tr><td>CON_COUNT_ERROR</td><td>1040</td><td>LOCK_OR_ACTIVE_TRANSACTION</td><td>1192</td></tr>
+<tr><td>OUT_OF_RESOURCES</td><td>1041</td><td>UNKNOWN_SYSTEM_VARIABLE</td><td>1193</td></tr>
+<tr><td>BAD_HOST_ERROR</td><td>1042</td><td>CRASHED_ON_USAGE</td><td>1194</td></tr>
+<tr><td>HANDSHAKE_ERROR</td><td>1043</td><td>CRASHED_ON_REPAIR</td><td>1195</td></tr>
+<tr><td>DBACCESS_DENIED_ERROR</td><td>1044</td><td>WARNING_NOT_COMPLETE_ROLLBACK</td><td>1196</td></tr>
+<tr><td>ACCESS_DENIED_ERROR</td><td>1045</td><td>TRANS_CACHE_FULL</td><td>1197</td></tr>
+<tr><td>NO_DB_ERROR</td><td>1046</td><td>SLAVE_MUST_STOP</td><td>1198</td></tr>
+<tr><td>UNKNOWN_COM_ERROR</td><td>1047</td><td>SLAVE_NOT_RUNNING</td><td>1199</td></tr>
+<tr><td>BAD_NULL_ERROR</td><td>1048</td><td>BAD_SLAVE</td><td>1200</td></tr>
+<tr><td>BAD_DB_ERROR</td><td>1049</td><td>MASTER_INFO</td><td>1201</td></tr>
+<tr><td>TABLE_EXISTS_ERROR</td><td>1050</td><td>SLAVE_THREAD</td><td>1202</td></tr>
+<tr><td>BAD_TABLE_ERROR</td><td>1051</td><td>TOO_MANY_USER_CONNECTIONS</td><td>1203</td></tr>
+<tr><td>NON_UNIQ_ERROR</td><td>1052</td><td>SET_CONSTANTS_ONLY</td><td>1204</td></tr>
+<tr><td>SERVER_SHUTDOWN</td><td>1053</td><td>LOCK_WAIT_TIMEOUT</td><td>1205</td></tr>
+<tr><td>BAD_FIELD_ERROR</td><td>1054</td><td>LOCK_TABLE_FULL</td><td>1206</td></tr>
+<tr><td>WRONG_FIELD_WITH_GROUP</td><td>1055</td><td>READ_ONLY_TRANSACTION</td><td>1207</td></tr>
+<tr><td>WRONG_GROUP_FIELD</td><td>1056</td><td>DROP_DB_WITH_READ_LOCK</td><td>1208</td></tr>
+<tr><td>WRONG_SUM_SELECT</td><td>1057</td><td>CREATE_DB_WITH_READ_LOCK</td><td>1209</td></tr>
+<tr><td>WRONG_VALUE_COUNT</td><td>1058</td><td>WRONG_ARGUMENTS</td><td>1210</td></tr>
+<tr><td>TOO_LONG_IDENT</td><td>1059</td><td>NO_PERMISSION_TO_CREATE_USER</td><td>1211</td></tr>
+<tr><td>DUP_FIELDNAME</td><td>1060</td><td>UNION_TABLES_IN_DIFFERENT_DIR</td><td>1212</td></tr>
+<tr><td>DUP_KEYNAME</td><td>1061</td><td>LOCK_DEADLOCK</td><td>1213</td></tr>
+<tr><td>DUP_ENTRY</td><td>1062</td><td>TABLE_CANT_HANDLE_FT</td><td>1214</td></tr>
+<tr><td>WRONG_FIELD_SPEC</td><td>1063</td><td>CANNOT_ADD_FOREIGN</td><td>1215</td></tr>
+<tr><td>PARSE_ERROR</td><td>1064</td><td>NO_REFERENCED_ROW</td><td>1216</td></tr>
+<tr><td>EMPTY_QUERY</td><td>1065</td><td>ROW_IS_REFERENCED</td><td>1217</td></tr>
+<tr><td>NONUNIQ_TABLE</td><td>1066</td><td>CONNECT_TO_MASTER</td><td>1218</td></tr>
+<tr><td>INVALID_DEFAULT</td><td>1067</td><td>QUERY_ON_MASTER</td><td>1219</td></tr>
+<tr><td>MULTIPLE_PRI_KEY</td><td>1068</td><td>ERROR_WHEN_EXECUTING_COMMAND</td><td>1220</td></tr>
+<tr><td>TOO_MANY_KEYS</td><td>1069</td><td>WRONG_USAGE</td><td>1221</td></tr>
+<tr><td>TOO_MANY_KEY_PARTS</td><td>1070</td><td>WRONG_NUMBER_OF_COLUMNS_IN_SELECT</td><td>1222</td></tr>
+<tr><td>TOO_LONG_KEY</td><td>1071</td><td>CANT_UPDATE_WITH_READLOCK</td><td>1223</td></tr>
+<tr><td>KEY_COLUMN_DOES_NOT_EXITS</td><td>1072</td><td>MIXING_NOT_ALLOWED</td><td>1224</td></tr>
+<tr><td>BLOB_USED_AS_KEY</td><td>1073</td><td>DUP_ARGUMENT</td><td>1225</td></tr>
+<tr><td>TOO_BIG_FIELDLENGTH</td><td>1074</td><td>USER_LIMIT_REACHED</td><td>1226</td></tr>
+<tr><td>WRONG_AUTO_KEY</td><td>1075</td><td>SPECIFIC_ACCESS_DENIED_ERROR</td><td>1227</td></tr>
+<tr><td>READY</td><td>1076</td><td>LOCAL_VARIABLE</td><td>1228</td></tr>
+<tr><td>NORMAL_SHUTDOWN</td><td>1077</td><td>GLOBAL_VARIABLE</td><td>1229</td></tr>
+<tr><td>GOT_SIGNAL</td><td>1078</td><td>NO_DEFAULT</td><td>1230</td></tr>
+<tr><td>SHUTDOWN_COMPLETE</td><td>1079</td><td>WRONG_VALUE_FOR_VAR</td><td>1231</td></tr>
+<tr><td>FORCING_CLOSE</td><td>1080</td><td>WRONG_TYPE_FOR_VAR</td><td>1232</td></tr>
+<tr><td>IPSOCK_ERROR</td><td>1081</td><td>VAR_CANT_BE_READ</td><td>1233</td></tr>
+<tr><td>NO_SUCH_INDEX</td><td>1082</td><td>CANT_USE_OPTION_HERE</td><td>1234</td></tr>
+<tr><td>WRONG_FIELD_TERMINATORS</td><td>1083</td><td>NOT_SUPPORTED_YET</td><td>1235</td></tr>
+<tr><td>BLOBS_AND_NO_TERMINATED</td><td>1084</td><td>MASTER_FATAL_ERROR_READING_BINLOG</td><td>1236</td></tr>
+<tr><td>TEXTFILE_NOT_READABLE</td><td>1085</td><td>SLAVE_IGNORED_TABLE</td><td>1237</td></tr>
+<tr><td>FILE_EXISTS_ERROR</td><td>1086</td><td>INCORRECT_GLOBAL_LOCAL_VAR</td><td>1238</td></tr>
+<tr><td>LOAD_INFO</td><td>1087</td><td>WRONG_FK_DEF</td><td>1239</td></tr>
+<tr><td>ALTER_INFO</td><td>1088</td><td>KEY_REF_DO_NOT_MATCH_TABLE_REF</td><td>1240</td></tr>
+<tr><td>WRONG_SUB_KEY</td><td>1089</td><td>OPERAND_COLUMNS</td><td>1241</td></tr>
+<tr><td>CANT_REMOVE_ALL_FIELDS</td><td>1090</td><td>SUBQUERY_NO_1_ROW</td><td>1242</td></tr>
+<tr><td>CANT_DROP_FIELD_OR_KEY</td><td>1091</td><td>UNKNOWN_STMT_HANDLER</td><td>1243</td></tr>
+<tr><td>INSERT_INFO</td><td>1092</td><td>CORRUPT_HELP_DB</td><td>1244</td></tr>
+<tr><td>UPDATE_TABLE_USED</td><td>1093</td><td>CYCLIC_REFERENCE</td><td>1245</td></tr>
+<tr><td>NO_SUCH_THREAD</td><td>1094</td><td>AUTO_CONVERT</td><td>1246</td></tr>
+<tr><td>KILL_DENIED_ERROR</td><td>1095</td><td>ILLEGAL_REFERENCE</td><td>1247</td></tr>
+<tr><td>NO_TABLES_USED</td><td>1096</td><td>DERIVED_MUST_HAVE_ALIAS</td><td>1248</td></tr>
+<tr><td>TOO_BIG_SET</td><td>1097</td><td>SELECT_REDUCED</td><td>1249</td></tr>
+<tr><td>NO_UNIQUE_LOGFILE</td><td>1098</td><td>TABLENAME_NOT_ALLOWED_HERE</td><td>1250</td></tr>
+<tr><td>TABLE_NOT_LOCKED_FOR_WRITE</td><td>1099</td><td>NOT_SUPPORTED_AUTH_MODE</td><td>1251</td></tr>
+<tr><td>TABLE_NOT_LOCKED</td><td>1100</td><td>SPATIAL_CANT_HAVE_NULL</td><td>1252</td></tr>
+<tr><td>BLOB_CANT_HAVE_DEFAULT</td><td>1101</td><td>COLLATION_CHARSET_MISMATCH</td><td>1253</td></tr>
+<tr><td>WRONG_DB_NAME</td><td>1102</td><td>SLAVE_WAS_RUNNING</td><td>1254</td></tr>
+<tr><td>WRONG_TABLE_NAME</td><td>1103</td><td>SLAVE_WAS_NOT_RUNNING</td><td>1255</td></tr>
+<tr><td>TOO_BIG_SELECT</td><td>1104</td><td>TOO_BIG_FOR_UNCOMPRESS</td><td>1256</td></tr>
+<tr><td>UNKNOWN_ERROR</td><td>1105</td><td>ZLIB_Z_MEM_ERROR</td><td>1257</td></tr>
+<tr><td>UNKNOWN_PROCEDURE</td><td>1106</td><td>ZLIB_Z_BUF_ERROR</td><td>1258</td></tr>
+<tr><td>WRONG_PARAMCOUNT_TO_PROCEDURE</td><td>1107</td><td>ZLIB_Z_DATA_ERROR</td><td>1259</td></tr>
+<tr><td>WRONG_PARAMETERS_TO_PROCEDURE</td><td>1108</td><td>CUT_VALUE_GROUP_CONCAT</td><td>1260</td></tr>
+<tr><td>UNKNOWN_TABLE</td><td>1109</td><td>WARN_TOO_FEW_RECORDS</td><td>1261</td></tr>
+<tr><td>FIELD_SPECIFIED_TWICE</td><td>1110</td><td>WARN_TOO_MANY_RECORDS</td><td>1262</td></tr>
+<tr><td>INVALID_GROUP_FUNC_USE</td><td>1111</td><td>WARN_NULL_TO_NOTNULL</td><td>1263</td></tr>
+<tr><td>UNSUPPORTED_EXTENSION</td><td>1112</td><td>WARN_DATA_OUT_OF_RANGE</td><td>1264</td></tr>
+<tr><td>TABLE_MUST_HAVE_COLUMNS</td><td>1113</td><td>WARN_DATA_TRUNCATED</td><td>1265</td></tr>
+<tr><td>RECORD_FILE_FULL</td><td>1114</td><td>WARN_USING_OTHER_HANDLER</td><td>1266</td></tr>
+<tr><td>UNKNOWN_CHARACTER_SET</td><td>1115</td><td>CANT_AGGREGATE_2COLLATIONS</td><td>1267</td></tr>
+<tr><td>TOO_MANY_TABLES</td><td>1116</td><td>DROP_USER</td><td>1268</td></tr>
+<tr><td>TOO_MANY_FIELDS</td><td>1117</td><td>REVOKE_GRANTS</td><td>1269</td></tr>
+<tr><td>TOO_BIG_ROWSIZE</td><td>1118</td><td>CANT_AGGREGATE_3COLLATIONS</td><td>1270</td></tr>
+<tr><td>STACK_OVERRUN</td><td>1119</td><td>CANT_AGGREGATE_NCOLLATIONS</td><td>1271</td></tr>
+<tr><td>WRONG_OUTER_JOIN</td><td>1120</td><td>VARIABLE_IS_NOT_STRUCT</td><td>1272</td></tr>
+<tr><td>NULL_COLUMN_IN_INDEX</td><td>1121</td><td>UNKNOWN_COLLATION</td><td>1273</td></tr>
+<tr><td>CANT_FIND_UDF</td><td>1122</td><td>SLAVE_IGNORED_SSL_PARAMS</td><td>1274</td></tr>
+<tr><td>CANT_INITIALIZE_UDF</td><td>1123</td><td>SERVER_IS_IN_SECURE_AUTH_MODE</td><td>1275</td></tr>
+<tr><td>UDF_NO_PATHS</td><td>1124</td><td>WARN_FIELD_RESOLVED</td><td>1276</td></tr>
+<tr><td>UDF_EXISTS</td><td>1125</td><td>BAD_SLAVE_UNTIL_COND</td><td>1277</td></tr>
+<tr><td>CANT_OPEN_LIBRARY</td><td>1126</td><td>MISSING_SKIP_SLAVE</td><td>1278</td></tr>
+<tr><td>CANT_FIND_DL_ENTRY</td><td>1127</td><td>UNTIL_COND_IGNORED</td><td>1279</td></tr>
+<tr><td>FUNCTION_NOT_DEFINED</td><td>1128</td><td>WRONG_NAME_FOR_INDEX</td><td>1280</td></tr>
+<tr><td>HOST_IS_BLOCKED</td><td>1129</td><td>WRONG_NAME_FOR_CATALOG</td><td>1281</td></tr>
+<tr><td>HOST_NOT_PRIVILEGED</td><td>1130</td><td>WARN_QC_RESIZE</td><td>1282</td></tr>
+<tr><td>PASSWORD_ANONYMOUS_USER</td><td>1131</td><td>BAD_FT_COLUMN</td><td>1283</td></tr>
+<tr><td>PASSWORD_NOT_ALLOWED</td><td>1132</td><td>UNKNOWN_KEY_CACHE</td><td>1284</td></tr>
+<tr><td>PASSWORD_NO_MATCH</td><td>1133</td><td>WARN_HOSTNAME_WONT_WORK</td><td>1285</td></tr>
+<tr><td>UPDATE_INFO</td><td>1134</td><td>UNKNOWN_STORAGE_ENGINE</td><td>1286</td></tr>
+<tr><td>CANT_CREATE_THREAD</td><td>1135</td><td>WARN_DEPRECATED_SYNTAX</td><td>1287</td></tr>
+<tr><td>WRONG_VALUE_COUNT_ON_ROW</td><td>1136</td><td>NON_UPDATABLE_TABLE</td><td>1288</td></tr>
+<tr><td>CANT_REOPEN_TABLE</td><td>1137</td><td>FEATURE_DISABLED</td><td>1289</td></tr>
+<tr><td>INVALID_USE_OF_NULL</td><td>1138</td><td>OPTION_PREVENTS_STATEMENT</td><td>1290</td></tr>
+<tr><td>REGEXP_ERROR</td><td>1139</td><td>DUPLICATED_VALUE_IN_TYPE</td><td>1291</td></tr>
+<tr><td>MIX_OF_GROUP_FUNC_AND_FIELDS</td><td>1140</td><td>TRUNCATED_WRONG_VALUE</td><td>1292</td></tr>
+<tr><td>NONEXISTING_GRANT</td><td>1141</td><td>TOO_MUCH_AUTO_TIMESTAMP_COLS</td><td>1293</td></tr>
+<tr><td>TABLEACCESS_DENIED_ERROR</td><td>1142</td><td>INVALID_ON_UPDATE</td><td>1294</td></tr>
+<tr><td>COLUMNACCESS_DENIED_ERROR</td><td>1143</td><td>UNSUPPORTED_PS</td><td>1295</td></tr>
+<tr><td>ILLEGAL_GRANT_FOR_TABLE</td><td>1144</td><td>GET_ERRMSG</td><td>1296</td></tr>
+<tr><td>GRANT_WRONG_HOST_OR_USER</td><td>1145</td><td>GET_TEMPORARY_ERRMSG</td><td>1297</td></tr>
+<tr><td>NO_SUCH_TABLE</td><td>1146</td><td>UNKNOWN_TIME_ZONE</td><td>1298</td></tr>
+<tr><td>NONEXISTING_TABLE_GRANT</td><td>1147</td><td>WARN_INVALID_TIMESTAMP</td><td>1299</td></tr>
+<tr><td>NOT_ALLOWED_COMMAND</td><td>1148</td><td>INVALID_CHARACTER_STRING</td><td>1300</td></tr>
+<tr><td>SYNTAX_ERROR</td><td>1149</td><td>WARN_ALLOWED_PACKET_OVERFLOWED</td><td>1301</td></tr>
+<tr><td>DELAYED_CANT_CHANGE_LOCK</td><td>1150</td><td>CONFLICTING_DECLARATIONS</td><td>1302</td></tr>
+<tr><td>TOO_MANY_DELAYED_THREADS</td><td>1151</td></tr>
+</tbody><caption>Errors</caption>
+</table>
+
+<hr size="2" width="100%"> 
+<address>$Rev: 189 $ $Date: 2008/01/23 20:27:42 $<br>
+Ian Redfern 
+(<a href="mailto:mysql%28at%29redferni.uklinux.net">mysql(at)redferni.uklinux.net</a>)
+</address>
+
+<p><b>This document is in the public domain, and you may do anything
+with it you wish. The author takes no responsibility for the accuracy
+of its contents. Some of the terms in this document are trademarks of
+MySQL AB and other companies. No trade secrets or other privileged
+information has been used in its compilation, and the author has no
+relationship with MySQL.</b></p> 
+
+
+</body></html>

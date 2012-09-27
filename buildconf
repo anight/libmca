@@ -1,0 +1,10 @@
+#! /bin/sh
+
+mkdir -p m4 autostuff build-O0 build-O3
+test -L acinclude.m4 || ln -s ../misc-m4.git/acinclude.m4 .
+
+aclocal
+libtoolize --force --copy
+autoheader
+automake --foreign --copy --add-missing
+autoconf

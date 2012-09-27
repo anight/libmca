@@ -1,0 +1,10 @@
+Makefile
+Makefile.in
+libmca.la
+libmca_config.h
+libmca_config.h.in
+*.o
+*.lo
+stamp-h1
+.deps
+.libs
