@@ -16,6 +16,9 @@ libmca_la_SOURCES = \
 	mca_buf.c \
 	mca_sha1.c
 
+include_HEADERS = \
+	$(top_srcdir)/include/mca.h
+
 libmca_la_LIBADD = $(LIBEVENT_LIBS)
 
 EXTRA_DIST = libmca_config.h.in
