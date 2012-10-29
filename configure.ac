@@ -14,7 +14,7 @@ AC_PROG_LN_S
 AC_PROG_MAKE_SET
 AC_PROG_LIBTOOL
 
-AX_CFLAGS="-W -Wall -Werror -pipe -Wpointer-arith -Wno-unused-parameter -Wno-unused-function -Wunused-variable -Wunused-value"
+AX_CPPFLAGS="-W -Wall -Werror -pipe -Wpointer-arith -Wno-unused-parameter -Wno-unused-function -Wunused-variable -Wunused-value"
 
 AC_CHECK_HEADERS([errno.h fcntl.h stdio.h stdlib.h unistd.h sys/uio.h])
 AC_CHECK_HEADERS([sys/select.h sys/socket.h sys/ioctl.h sys/time.h])
@@ -22,7 +22,7 @@ AC_CHECK_HEADERS([arpa/inet.h netinet/in.h])
 
 AX_LIBEVENT
 
-AC_SUBST(AX_CFLAGS)
+AC_SUBST(AX_CPPFLAGS)
 
 AC_CONFIG_FILES([Makefile
                  src/Makefile test/Makefile])
